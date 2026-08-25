@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: "3"
+
+tasks:
+  default:
+    cmds:
+      - task: proto
+
+  proto:
+    desc: Compile protobuf schemas for Go (Rust is handled via build.rs)
+    cmds:
+      - mkdir -p client/ipc
+      - >
+        protoc 
+        --go_out=client/ipc --go_opt=paths=source_relative 
+        --go-grpc_out=client/ipc --go-grpc_opt=paths=source_relative 
+        -I proto proto/decentis.proto
+    sources:
+      - proto/*.proto
+    generates:
+      - client/ipc/*.go

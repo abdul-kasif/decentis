@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+option go_package = "decentis/ipc";
+
+package decentis.v1;
+
+service DaemonControl {
+  rpc GetStatus (StatusRequest) returns (StatusResponse);
+
+  rpc InitiateSend (SendFileRequest) returns (stream TransferProgress);
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  string virtual_ip = 1;
+  bool is_active = 2;
+  int32 active_peers = 3;
+}
+
+message SendFileRequest {
+  string file_path = 1;
+  string peer_virtual_ip = 2;
+}
+
+message TransferProgress {
+  string transfer_id = 1;
+  uint64 bytes_transferred = 2;
+  uint64 total_bytes = 3;
+  double speed_mbps = 4;
+  string status = 5;
+}
