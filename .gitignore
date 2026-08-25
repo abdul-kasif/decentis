@@ -9,6 +9,9 @@ bin/
 *.so
 *.dylib
 
+# Rust binaries and local builds  
+daemon/target
+
 # OS generated files
 .DS_Store
 Thumbs.db

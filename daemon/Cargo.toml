@@ -1,0 +1,23 @@
+[package]
+name = "decentisd"
+version = "0.1.0"
+edition = "2021"
+authors = ["Abdul Kasif <abdulkasif.ra@gmail.com>"]
+description = "High-Performance Core Data Plane Daemon for Decentis"
+
+[[bin]]
+name = "decentisd"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.53", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.14"
+prost = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+tonic-prost = "0.14.6"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
