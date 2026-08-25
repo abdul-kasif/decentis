@@ -6,9 +6,10 @@ tasks:
   default:
     cmds:
       - task: proto
+      - task: build-all
 
   proto:
-    desc: Compile protobuf schemas for Go (Rust is handled via build.rs)
+    desc: Compile protobuf schemas for Go
     cmds:
       - mkdir -p client/ipc
       - >
@@ -20,3 +21,19 @@ tasks:
       - proto/*.proto
     generates:
       - client/ipc/*.go
+
+  build-daemon:
+    desc: Build Rust daemon binary
+    cmds:
+      - cd daemon && cargo build
+
+  build-client:
+    desc: Build Go client binary
+    cmds:
+      - cd client && go build -o ../bin/decentis .
+
+  build-all:
+    desc: Build both daemon and client
+    cmds:
+      - task: build-daemon
+      - task: build-client
