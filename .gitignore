@@ -1,0 +1,14 @@
+# Taskfile tool cache
+.task/
+
+# Go binaries and local builds
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# OS generated files
+.DS_Store
+Thumbs.db
