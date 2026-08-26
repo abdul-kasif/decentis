@@ -110,7 +110,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Environment configuration
     let vip = env::var("VIP").unwrap_or_else(|_| "10.99.0.1".to_string());
     let port = env::var("PORT").unwrap_or_else(|_| "51820".to_string());
-    let peer_addr = env::var("PEER").ok();
     let peer_pub_b64 = env::var("PEER_PUB").ok();
 
     let socket_path = format!("/tmp/decentis_{}.sock", port);
@@ -137,14 +136,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (peer_discovered_tx, mut peer_discovered_rx) = tokio::sync::mpsc::channel(16);
     let my_node_pubkey_b64 = b64.encode(&local_key.public);
 
-    // Instantiate client outside so it can be moved into the async block
     let sig_client = Arc::new(nat::signaling::SignalingClient::new(
         "http://127.0.0.1:50051",
         my_node_pubkey_b64,
     ));
 
     let sig_client_clone = sig_client.clone();
-    let port_str = port.clone();
+
+    // Clone the target pubkey for the NAT task so it knows who to dial after registering
+    let dial_target_pub_for_nat = peer_pub_b64.clone();
 
     tokio::spawn(async move {
         let mut public_socket: Option<SocketAddr> = None;
@@ -159,7 +159,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Tier 1 UPnP failed: {}. Falling back to Tier 2 (STUN)...",
                     e
                 );
-
                 match nat::stun::discover_public_ip().await {
                     Ok(public_addr) => {
                         tracing::info!(
@@ -168,13 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         public_socket = Some(SocketAddr::new(public_addr.ip(), local_port));
                     }
-                    Err(stun_err) => {
-                        tracing::error!(
-                            "Tier 2 STUN failed: {}. Node is strictly firewalled.",
-                            stun_err
-                        );
-                        // TODO: Fallback to Tier 4 (Mesh Relaying)
-                    }
+                    Err(stun_err) => tracing::error!("Tier 2 STUN failed: {}", stun_err),
                 }
             }
         }
@@ -185,11 +178,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Registering with signaling server using address: {}",
                 socket
             );
+
             if let Err(err) = sig_client_clone
                 .start_registration(socket, "127.0.0.1".to_string(), peer_discovered_tx)
                 .await
             {
                 tracing::error!("Signaling server registration failed: {}", err);
+            } else {
+                if let Some(target_pub) = dial_target_pub_for_nat {
+                    tracing::info!("Registration complete. Requesting signaling rendezvous for target peer: {}", target_pub);
+                    if let Err(e) = sig_client_clone.dial_peer(&target_pub).await {
+                        tracing::error!(
+                            "Failed to request rendezvous from signaling server: {:?}",
+                            e
+                        );
+                    }
+                }
             }
         } else {
             tracing::error!("Skipping signaling registration: No public IP discovered.");
@@ -202,127 +206,211 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize the shared Peer Registry
     let peer_registry: PeerRegistry = Arc::new(RwLock::new(HashMap::new()));
 
-    let vip_network_clone = vip.clone();
+    let _vip_network_clone = vip.clone();
     let registry_for_network = peer_registry.clone();
 
     // Default save directory for incoming files (current directory)
     let save_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
+    // --- 3. Dynamic Rendezvous & Connection Management ---
+    let quic_endpoint_active = quic_endpoint.clone();
+    let tun_for_dialer = active_tun.clone();
+    let local_key_for_dialer = local_key.clone();
+    let peer_registry_for_dialer = registry_for_network.clone();
+    let save_dir_for_dialer = save_dir.clone();
+    let vip_for_dialer = vip.clone();
+    let current_peer_pub_filter = peer_pub_b64.clone(); // Safely moved into closure instead of parent scope mapping
+
+    // Spawn the Rendezvous Listener Task
     tokio::spawn(async move {
-        let vip = vip_network_clone;
+        // Handle incoming rendezvous discovery events from the signaling stream
+        while let Some(peer) = peer_discovered_rx.recv().await {
+            tracing::info!(
+                "Rendezvous event received for peer {} at {}:{} (LAN: {})",
+                peer.target_node_id,
+                peer.public_ip,
+                peer.public_port,
+                peer.local_ip
+            );
 
-        if let Some(peer) = peer_addr {
-            // --- DIALER LOGIC ---
-            let addr = peer.parse().unwrap();
-            let remote_pub = b64
-                .decode(peer_pub_b64.expect("PEER_PUB env var required for dialer"))
-                .unwrap();
-
-            tracing::info!("Dialing peer at {}...", addr);
-            let conn = quic_endpoint
-                .connect(addr, "decentis.local")
-                .unwrap()
-                .await
-                .unwrap();
-            tracing::info!("Connected! Initiating Noise_IK handshake...");
-
-            match transport::handshake::initiate_noise_handshake(&conn, &local_key, &remote_pub)
-                .await
-            {
-                Ok((tx, rx)) => {
-                    tracing::info!("Handshake successful. Establishing secure bridge.");
-
-                    let peer_vip = if vip == "10.99.0.1" {
-                        "10.99.0.2"
-                    } else {
-                        "10.99.0.1"
-                    };
-                    registry_for_network
-                        .write()
-                        .await
-                        .insert(peer_vip.to_string(), conn.clone());
-
-                    transport::stream::spawn_incoming_stream_listener(
-                        conn.clone(),
-                        save_dir.clone(),
-                    );
-
-                    let _ =
-                        transport::datagram::start_secure_datagram_bridge(conn, active_tun, tx, rx)
-                            .await;
+            let target_ip: std::net::IpAddr = match peer.public_ip.parse() {
+                Ok(ip) => ip,
+                Err(e) => {
+                    tracing::error!("Failed to parse peer public IP: {}", e);
+                    continue;
                 }
-                Err(e) => tracing::error!("Noise_IK handshake failed: {:?}", e),
+            };
+            let target_port = peer.public_port as u16;
+
+            // Tier 3: Fire UDP Hole-Punching Probes to open local NAT mapping
+            if let Err(e) = nat::punch::fire_prediction_probes(target_ip, target_port).await {
+                tracing::warn!("Hole punch probe batch warning: {}", e);
             }
-        } else {
-            // --- LISTENER LOGIC ---
-            tracing::info!("Waiting for incoming P2P connections...");
-            while let Some(incoming) = quic_endpoint.accept().await {
-                let active_tun = active_tun.clone();
-                let local_key = local_key.clone();
-                let registry_ref = registry_for_network.clone();
-                let save_dir_ref = save_dir.clone();
 
-                let current_node_vip = vip.clone();
+            // If we are the initiating dialer (started with PEER_PUB), dial the peer over QUIC
+            if current_peer_pub_filter.as_deref() == Some(&peer.target_node_id) {
+                let target_public = SocketAddr::new(target_ip, target_port);
 
-                tokio::spawn(async move {
-                    match incoming.await {
-                        Ok(conn) => {
-                            tracing::info!("Accepted connection. Awaiting Noise_IK handshake...");
-                            match transport::handshake::respond_noise_handshake(&conn, &local_key)
-                                .await
-                            {
-                                Ok((tx, rx)) => {
-                                    tracing::info!(
-                                        "Handshake successful. Establishing secure bridge."
-                                    );
+                // Parse the local IP from the signaling server
+                let target_local_ip: std::net::IpAddr = peer.local_ip.parse().unwrap_or(target_ip);
+                let target_local = SocketAddr::new(target_local_ip, target_port);
 
-                                    let peer_vip = if current_node_vip == "10.99.0.1" {
-                                        "10.99.0.2"
-                                    } else {
-                                        "10.99.0.1"
-                                    };
-                                    registry_ref
-                                        .write()
-                                        .await
-                                        .insert(peer_vip.to_string(), conn.clone());
+                let remote_pub = match b64.decode(&peer.target_node_id) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        tracing::error!("Failed to decode peer public key: {}", e);
+                        continue;
+                    }
+                };
 
-                                    transport::stream::spawn_incoming_stream_listener(
-                                        conn.clone(),
-                                        save_dir_ref,
-                                    );
+                tracing::info!(
+                    "Dialing QUIC... (LAN: {}, Public: {})",
+                    target_local,
+                    target_public
+                );
 
-                                    let _ = transport::datagram::start_secure_datagram_bridge(
-                                        conn, active_tun, tx, rx,
-                                    )
-                                    .await;
-                                }
-                                Err(e) => tracing::error!("Noise_IK handshake failed: {:?}", e),
+                // Allow a brief delay for NAT state tables to settle after hole punching
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                // Try connecting via the local network first (Bypasses NAT Hairpinning)
+                let conn_result = match quic_endpoint_active
+                    .connect(target_local, "decentis.local")
+                    .unwrap()
+                    .await
+                {
+                    Ok(conn) => {
+                        tracing::info!("Connected via LAN/Localhost!");
+                        Ok(conn)
+                    }
+                    Err(_) => {
+                        tracing::warn!("LAN route failed, attempting Public STUN route...");
+                        // Fallback to UDP hole-punched public route
+                        quic_endpoint_active
+                            .connect(target_public, "decentis.local")
+                            .unwrap()
+                            .await
+                    }
+                };
+
+                match conn_result {
+                    Ok(conn) => {
+                        tracing::info!(
+                            "QUIC connection established! Initiating Noise_IK handshake..."
+                        );
+                        match transport::handshake::initiate_noise_handshake(
+                            &conn,
+                            &local_key_for_dialer,
+                            &remote_pub,
+                        )
+                        .await
+                        {
+                            Ok((tx, rx)) => {
+                                tracing::info!(
+                                    "Noise_IK handshake successful. Secure tunnel active."
+                                );
+                                let peer_vip = if vip_for_dialer == "10.99.0.1" {
+                                    "10.99.0.2"
+                                } else {
+                                    "10.99.0.1"
+                                };
+                                peer_registry_for_dialer
+                                    .write()
+                                    .await
+                                    .insert(peer_vip.to_string(), conn.clone());
+
+                                transport::stream::spawn_incoming_stream_listener(
+                                    conn.clone(),
+                                    save_dir_for_dialer.clone(),
+                                );
+
+                                let _ = transport::datagram::start_secure_datagram_bridge(
+                                    conn,
+                                    tun_for_dialer.clone(),
+                                    tx,
+                                    rx,
+                                )
+                                .await;
                             }
-                        }
-                        Err(err) => {
-                            tracing::error!("Failed to complete QUIC inbound handshake: {:?}", err)
+                            Err(e) => tracing::error!("Noise_IK handshake failed: {:?}", e),
                         }
                     }
-                });
+                    Err(e) => {
+                        tracing::error!("QUIC dial connections exhausted and failed: {:?}", e)
+                    }
+                }
             }
         }
     });
 
-    // 3. Start gRPC IPC Server
+    // --- 4. Continuous Inbound Listener Logic ---
+    // Every node acts as a server to handle incoming connections seamlessly
+    let quic_endpoint_listener = quic_endpoint.clone();
+    let active_tun_listener = active_tun.clone();
+    let registry_for_listener = registry_for_network.clone();
+    let local_key_listener = local_key.clone();
+    let save_dir_listener = save_dir.clone();
+    let vip_listener = vip.clone();
+
+    tokio::spawn(async move {
+        tracing::info!("Awaiting inbound P2P socket allocations...");
+        while let Some(incoming) = quic_endpoint_listener.accept().await {
+            let active_tun = active_tun_listener.clone();
+            let local_key = local_key_listener.clone();
+            let registry_ref = registry_for_listener.clone();
+            let save_dir_ref = save_dir_listener.clone();
+            let current_node_vip = vip_listener.clone();
+
+            tokio::spawn(async move {
+                match incoming.await {
+                    Ok(conn) => {
+                        tracing::info!("Accepted connection. Awaiting Noise_IK handshake...");
+                        match transport::handshake::respond_noise_handshake(&conn, &local_key).await
+                        {
+                            Ok((tx, rx)) => {
+                                tracing::info!("Handshake successful. Establishing secure bridge.");
+                                let peer_vip = if current_node_vip == "10.99.0.1" {
+                                    "10.99.0.2"
+                                } else {
+                                    "10.99.0.1"
+                                };
+                                registry_ref
+                                    .write()
+                                    .await
+                                    .insert(peer_vip.to_string(), conn.clone());
+                                transport::stream::spawn_incoming_stream_listener(
+                                    conn.clone(),
+                                    save_dir_ref,
+                                );
+                                let _ = transport::datagram::start_secure_datagram_bridge(
+                                    conn, active_tun, tx, rx,
+                                )
+                                .await;
+                            }
+                            Err(e) => tracing::error!("Noise_IK handshake failed: {:?}", e),
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!("Failed to complete QUIC inbound handshake: {:?}", err)
+                    }
+                }
+            });
+        }
+    });
+
+    // 5. Start gRPC IPC Server
     if Path::new(&socket_path).exists() {
         fs::remove_file(&socket_path)?;
     }
     let listener = UnixListener::bind(&socket_path)?;
     tracing::info!("IPC listening on UDS: {}", socket_path);
-
     let service = ControlServiceImpl {
         peers: peer_registry,
         local_vip: vip,
     };
-
     Server::builder()
         .add_service(DaemonControlServer::new(service))
         .serve_with_incoming(UnixListenerStream::new(listener))
         .await?;
+
     Ok(())
 }

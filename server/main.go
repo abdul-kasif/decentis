@@ -56,6 +56,11 @@ func (s *SignalingServer) StartConnection(req *pb.SignalMessage, stream pb.Signa
 
 	log.Printf("[+] Node Registered: %s at %s:%d (LAN: %s)", nodeID, session.PublicIP, session.PublicPort, session.LocalIP)
 
+	// Explicitly flush HTTP/2 headers to unblock the Rust gRPC client
+	if err := stream.SendHeader(nil); err != nil {
+		log.Printf("Warning: failed to send headers: %v", err)
+	}
+
 	defer func() {
 		s.mu.Lock()
 		delete(s.nodes, nodeID)
