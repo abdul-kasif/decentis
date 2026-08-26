@@ -4,6 +4,8 @@ use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{transport::Server, Request, Response, Status};
 
+mod tun;
+
 pub mod proto {
     tonic::include_proto!("decentis.v1");
 }
@@ -48,9 +50,15 @@ impl DaemonControl for ControlServiceImpl {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
+    // 1. Initialize the Virtual Network Interface
+    if let Err(e) = tun::device::start_tun_device().await {
+        tracing::error!("Failed to start TUN device: {}", e);
+        return Err(e.into());
+    }
+
+    // 2. Start the IPC Server
     let socket_path = "/tmp/decentis.sock";
 
-    // Clean up stale socket file if it exists
     if Path::new(socket_path).exists() {
         fs::remove_file(socket_path)?;
     }
@@ -59,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Decentis Daemon IPC listening on UDS: {}", socket_path);
 
     let stream = UnixListenerStream::new(listener);
-    let service = ControlServiceImpl::default();
+    let service = ControlServiceImpl;
 
     Server::builder()
         .add_service(DaemonControlServer::new(service))
