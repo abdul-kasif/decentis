@@ -4,6 +4,7 @@
 pub struct ReplayFilter {
     highest_seq: u64,
     bitmap: u128,
+    started: bool,
 }
 
 impl ReplayFilter {
@@ -11,15 +12,17 @@ impl ReplayFilter {
         Self {
             highest_seq: 0,
             bitmap: 0,
+            started: false,
         }
     }
 
     /// Checks if a sequence number is valid and marks it as seen.
     /// Returns `true` if the packet should be accepted, `false` if it is a replay or too old.
     pub fn check_and_mark(&mut self, seq: u64) -> bool {
-        // First packet initialization
-        if self.highest_seq == 0 && seq == 0 {
-            self.bitmap |= 1;
+        if !self.started {
+            self.highest_seq = seq;
+            self.bitmap = 1;
+            self.started = true;
             return true;
         }
 
