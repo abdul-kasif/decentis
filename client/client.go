@@ -1,18 +1,25 @@
 package main
 
 import (
+	"fmt"
+	"os"
+
 	pb "decentis/ipc"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const SocketPath = "/tmp/decentis.sock"
-
 func GetClient() (pb.DaemonControlClient, *grpc.ClientConn, error) {
-	// 1. Use the native "unix:" scheme
-	// 2. Inject WithAuthority("localhost") to satisfy Rust/Tonic's strict HTTP/2 parser
-	conn, err := grpc.NewClient("unix:"+SocketPath,
+	// Read PORT from environment, default to 51820
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "51820"
+	}
+
+	socketPath := fmt.Sprintf("/tmp/decentis_%s.sock", port)
+
+	conn, err := grpc.NewClient("unix:"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithAuthority("localhost"),
 	)
