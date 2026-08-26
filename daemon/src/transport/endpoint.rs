@@ -52,10 +52,13 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         vec![
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
             rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
         ]
     }
 }
@@ -80,12 +83,17 @@ pub fn create_quic_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
     ));
 
     // 2. Configure the Client (for outgoing connections)
-    let client_crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider))
+
+    // 2. Configure the Client (for outgoing connections)
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider))
         .with_safe_default_protocol_versions()?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
 
+    client_crypto.alpn_protocols = vec![b"decentis-mesh".to_vec()];
+
+    // Convert using TryFrom instead of `.new()` to satisfy trait wrappers
     let client_config_engine = quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?;
     let mut client_config = ClientConfig::new(Arc::new(client_config_engine));
 
