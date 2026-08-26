@@ -75,11 +75,14 @@ func (x *SignalResponse) GetMessage() string {
 
 type SignalMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// Using `oneof` allows us to multiplex different events over the same RPC methods
+	//
 	// Types that are valid to be assigned to Payload:
 	//
 	//	*SignalMessage_Register
 	//	*SignalMessage_Dial
 	//	*SignalMessage_PeerFound
+	//	*SignalMessage_Disconnect
 	Payload       isSignalMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -149,6 +152,15 @@ func (x *SignalMessage) GetPeerFound() *PeerFound {
 	return nil
 }
 
+func (x *SignalMessage) GetDisconnect() *DisconnectNode {
+	if x != nil {
+		if x, ok := x.Payload.(*SignalMessage_Disconnect); ok {
+			return x.Disconnect
+		}
+	}
+	return nil
+}
+
 type isSignalMessage_Payload interface {
 	isSignalMessage_Payload()
 }
@@ -165,11 +177,17 @@ type SignalMessage_PeerFound struct {
 	PeerFound *PeerFound `protobuf:"bytes,3,opt,name=peer_found,json=peerFound,proto3,oneof"`
 }
 
+type SignalMessage_Disconnect struct {
+	Disconnect *DisconnectNode `protobuf:"bytes,4,opt,name=disconnect,proto3,oneof"` // 1. Added the disconnect payload variant
+}
+
 func (*SignalMessage_Register) isSignalMessage_Payload() {}
 
 func (*SignalMessage_Dial) isSignalMessage_Payload() {}
 
 func (*SignalMessage_PeerFound) isSignalMessage_Payload() {}
+
+func (*SignalMessage_Disconnect) isSignalMessage_Payload() {}
 
 type RegisterNode struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -359,6 +377,50 @@ func (x *PeerFound) GetLocalIp() string {
 	return ""
 }
 
+type DisconnectNode struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"` // Base64 Public Key of the disconnecting node
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DisconnectNode) Reset() {
+	*x = DisconnectNode{}
+	mi := &file_signaling_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DisconnectNode) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DisconnectNode) ProtoMessage() {}
+
+func (x *DisconnectNode) ProtoReflect() protoreflect.Message {
+	mi := &file_signaling_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DisconnectNode.ProtoReflect.Descriptor instead.
+func (*DisconnectNode) Descriptor() ([]byte, []int) {
+	return file_signaling_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *DisconnectNode) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
 var File_signaling_proto protoreflect.FileDescriptor
 
 const file_signaling_proto_rawDesc = "" +
@@ -366,12 +428,15 @@ const file_signaling_proto_rawDesc = "" +
 	"\x0fsignaling.proto\x12\x15decentis.signaling.v1\"D\n" +
 	"\x0eSignalResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\xd7\x01\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xa0\x02\n" +
 	"\rSignalMessage\x12A\n" +
 	"\bregister\x18\x01 \x01(\v2#.decentis.signaling.v1.RegisterNodeH\x00R\bregister\x125\n" +
 	"\x04dial\x18\x02 \x01(\v2\x1f.decentis.signaling.v1.DialPeerH\x00R\x04dial\x12A\n" +
 	"\n" +
-	"peer_found\x18\x03 \x01(\v2 .decentis.signaling.v1.PeerFoundH\x00R\tpeerFoundB\t\n" +
+	"peer_found\x18\x03 \x01(\v2 .decentis.signaling.v1.PeerFoundH\x00R\tpeerFound\x12G\n" +
+	"\n" +
+	"disconnect\x18\x04 \x01(\v2%.decentis.signaling.v1.DisconnectNodeH\x00R\n" +
+	"disconnectB\t\n" +
 	"\apayload\"\x80\x01\n" +
 	"\fRegisterNode\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1b\n" +
@@ -388,7 +453,9 @@ const file_signaling_proto_rawDesc = "" +
 	"\tpublic_ip\x18\x02 \x01(\tR\bpublicIp\x12\x1f\n" +
 	"\vpublic_port\x18\x03 \x01(\rR\n" +
 	"publicPort\x12\x19\n" +
-	"\blocal_ip\x18\x04 \x01(\tR\alocalIp2\xce\x01\n" +
+	"\blocal_ip\x18\x04 \x01(\tR\alocalIp\")\n" +
+	"\x0eDisconnectNode\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId2\xce\x01\n" +
 	"\x10SignalingService\x12_\n" +
 	"\x0fStartConnection\x12$.decentis.signaling.v1.SignalMessage\x1a$.decentis.signaling.v1.SignalMessage0\x01\x12Y\n" +
 	"\n" +
@@ -406,27 +473,29 @@ func file_signaling_proto_rawDescGZIP() []byte {
 	return file_signaling_proto_rawDescData
 }
 
-var file_signaling_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_signaling_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_signaling_proto_goTypes = []any{
 	(*SignalResponse)(nil), // 0: decentis.signaling.v1.SignalResponse
 	(*SignalMessage)(nil),  // 1: decentis.signaling.v1.SignalMessage
 	(*RegisterNode)(nil),   // 2: decentis.signaling.v1.RegisterNode
 	(*DialPeer)(nil),       // 3: decentis.signaling.v1.DialPeer
 	(*PeerFound)(nil),      // 4: decentis.signaling.v1.PeerFound
+	(*DisconnectNode)(nil), // 5: decentis.signaling.v1.DisconnectNode
 }
 var file_signaling_proto_depIdxs = []int32{
 	2, // 0: decentis.signaling.v1.SignalMessage.register:type_name -> decentis.signaling.v1.RegisterNode
 	3, // 1: decentis.signaling.v1.SignalMessage.dial:type_name -> decentis.signaling.v1.DialPeer
 	4, // 2: decentis.signaling.v1.SignalMessage.peer_found:type_name -> decentis.signaling.v1.PeerFound
-	1, // 3: decentis.signaling.v1.SignalingService.StartConnection:input_type -> decentis.signaling.v1.SignalMessage
-	1, // 4: decentis.signaling.v1.SignalingService.SendSignal:input_type -> decentis.signaling.v1.SignalMessage
-	1, // 5: decentis.signaling.v1.SignalingService.StartConnection:output_type -> decentis.signaling.v1.SignalMessage
-	0, // 6: decentis.signaling.v1.SignalingService.SendSignal:output_type -> decentis.signaling.v1.SignalResponse
-	5, // [5:7] is the sub-list for method output_type
-	3, // [3:5] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	5, // 3: decentis.signaling.v1.SignalMessage.disconnect:type_name -> decentis.signaling.v1.DisconnectNode
+	1, // 4: decentis.signaling.v1.SignalingService.StartConnection:input_type -> decentis.signaling.v1.SignalMessage
+	1, // 5: decentis.signaling.v1.SignalingService.SendSignal:input_type -> decentis.signaling.v1.SignalMessage
+	1, // 6: decentis.signaling.v1.SignalingService.StartConnection:output_type -> decentis.signaling.v1.SignalMessage
+	0, // 7: decentis.signaling.v1.SignalingService.SendSignal:output_type -> decentis.signaling.v1.SignalResponse
+	6, // [6:8] is the sub-list for method output_type
+	4, // [4:6] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_signaling_proto_init() }
@@ -438,6 +507,7 @@ func file_signaling_proto_init() {
 		(*SignalMessage_Register)(nil),
 		(*SignalMessage_Dial)(nil),
 		(*SignalMessage_PeerFound)(nil),
+		(*SignalMessage_Disconnect)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -445,7 +515,7 @@ func file_signaling_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_signaling_proto_rawDesc), len(file_signaling_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

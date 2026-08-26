@@ -61,10 +61,12 @@ use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc; // Shared atomic pointers
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::UnixListenerStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Request, Response, Status};
 use uuid::Uuid;
 
@@ -160,9 +162,38 @@ impl DaemonControl for ControlServiceImpl {
     }
 }
 
+async fn shutdown_signal(token: CancellationToken) {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("Shutdown signal received! Initiating graceful teardown...");
+    token.cancel();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+
+    let shutdown_token = CancellationToken::new();
 
     // Environment configuration
     let vip = env::var("VIP").unwrap_or_else(|_| "10.99.0.1".to_string());
@@ -193,6 +224,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (peer_discovered_tx, mut peer_discovered_rx) = tokio::sync::mpsc::channel(16);
     let my_node_pubkey_b64 = b64.encode(&local_key.public);
 
+    let upnp_mapped = Arc::new(AtomicBool::new(false));
+    let upnp_mapped_clone = upnp_mapped.clone();
+
     let sig_client = Arc::new(nat::signaling::SignalingClient::new(
         "http://127.0.0.1:50051",
         my_node_pubkey_b64,
@@ -210,6 +244,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(public_addr) => {
                 tracing::info!("Tier 1 Traversal complete. Endpoint: {}", public_addr);
                 public_socket = Some(public_addr);
+
+                upnp_mapped_clone.store(true, Ordering::SeqCst);
             }
             Err(e) => {
                 tracing::warn!(
@@ -459,15 +495,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::remove_file(&socket_path)?;
     }
     let listener = UnixListener::bind(&socket_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o777))
+            .expect("Failed to set socket permissions");
+    }
+
     tracing::info!("IPC listening on UDS: {}", socket_path);
     let service = ControlServiceImpl {
         peers: peer_registry,
         local_vip: vip,
     };
+
+    let token_clone = shutdown_token.clone();
+
+    // Use `serve_with_incoming_shutdown` and pass our signal listener
+    // Start gRPC server and await the signal trigger
     Server::builder()
         .add_service(DaemonControlServer::new(service))
-        .serve_with_incoming(UnixListenerStream::new(listener))
+        .serve_with_incoming_shutdown(
+            UnixListenerStream::new(listener),
+            shutdown_signal(token_clone),
+        )
         .await?;
 
+    // =========================================================
+    // TEARDOWN SEQUENCE (Executes after signal is received)
+    // =========================================================
+    tracing::info!("Shutting down Decentis daemon...");
+
+    // 1. Notify the signaling server with a Disconnect event
+    tracing::info!("Notifying signaling server of disconnection...");
+    // Assuming your client has a disconnect method or you drop it to close the channel
+    if let Err(e) = sig_client.disconnect().await {
+        tracing::warn!("Failed to notify signaling server: {:?}", e);
+    }
+
+    // 2. Close all active QUIC connections immediately
+    quic_endpoint.close(0u32.into(), b"Daemon shutting down");
+
+    // 3. Clean up the Unix Domain Socket file
+    if Path::new(&socket_path).exists() {
+        if let Err(e) = fs::remove_file(&socket_path) {
+            tracing::warn!("Failed to remove UDS socket: {}", e);
+        } else {
+            tracing::info!("IPC socket removed.");
+        }
+    }
+
+    // 4. Release the UPnP router port mapping if we created one
+    if upnp_mapped.load(Ordering::SeqCst) {
+        tracing::info!("Releasing UPnP port mapping from router...");
+        if let Err(e) = nat::upnp::remove_external_port(local_port).await {
+            tracing::warn!("Failed to clean up UPnP: {}", e);
+        } else {
+            tracing::info!("UPnP mapping cleanly released.");
+        }
+    }
+
+    // 5. Explicitly drop the TUN device to force the OS to delete the virtual interface
+    tracing::info!("Bringing down TUN network interface...");
+    drop(tun_dev);
+
+    tracing::info!("Cleanup complete. Goodbye!");
     Ok(())
 }

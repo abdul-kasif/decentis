@@ -36,6 +36,7 @@ blake3 = { version = "1.8", features = ["rayon", "mmap"] }
 bitvec = "1.1"
 uuid = { version = "1.25.0", features = ["v4"] }
 igd-next = "0.17.1"
+tokio-util = "0.7.19"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

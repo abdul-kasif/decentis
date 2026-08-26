@@ -84,4 +84,39 @@ impl SignalingClient {
         info!("Dial request sent for peer: {}", target_node_id);
         Ok(())
     }
+
+    /// Notifies the signaling server that this node is cleanly disconnecting.
+    pub async fn disconnect(&self) -> Result<()> {
+        let mut client = SignalingServiceClient::connect(self.server_addr.clone())
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to connect to signaling server during shutdown: {}",
+                    e
+                )
+            })?;
+
+        // 1. Wrap the DisconnectNode payload variant
+        let disconnect_msg = SignalMessage {
+            payload: Some(Payload::Disconnect(
+                crate::signaling_proto::DisconnectNode {
+                    node_id: self.node_id.clone(),
+                },
+            )),
+        };
+
+        // 2. Dispatch it via the same unary signal method you use for dial
+        info!("Sending clean disconnect notification to signaling server...");
+        let response = client.send_signal(disconnect_msg).await?.into_inner();
+
+        if !response.success {
+            return Err(anyhow!(
+                "Signaling server rejected disconnect payload: {}",
+                response.message
+            ));
+        }
+
+        info!("Signaling unregistration complete.");
+        Ok(())
+    }
 }

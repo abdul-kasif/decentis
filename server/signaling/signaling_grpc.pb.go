@@ -29,7 +29,7 @@ const (
 type SignalingServiceClient interface {
 	// Registers the node and opens a server-push stream for peer events
 	StartConnection(ctx context.Context, in *SignalMessage, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SignalMessage], error)
-	// Unary call to initiate actions (e.g., dial a peer)
+	// Unary call to initiate actions (e.g., dial a peer, disconnect)
 	SendSignal(ctx context.Context, in *SignalMessage, opts ...grpc.CallOption) (*SignalResponse, error)
 }
 
@@ -76,7 +76,7 @@ func (c *signalingServiceClient) SendSignal(ctx context.Context, in *SignalMessa
 type SignalingServiceServer interface {
 	// Registers the node and opens a server-push stream for peer events
 	StartConnection(*SignalMessage, grpc.ServerStreamingServer[SignalMessage]) error
-	// Unary call to initiate actions (e.g., dial a peer)
+	// Unary call to initiate actions (e.g., dial a peer, disconnect)
 	SendSignal(context.Context, *SignalMessage) (*SignalResponse, error)
 	mustEmbedUnimplementedSignalingServiceServer()
 }

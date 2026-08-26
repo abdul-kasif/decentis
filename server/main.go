@@ -69,8 +69,10 @@ func (s *SignalingServer) StartConnection(req *pb.SignalMessage, stream pb.Signa
 		log.Printf("[-] Node Disconnected: %s", nodeID)
 	}()
 
-	// Push events down to the node as they arrive
 	for msg := range eventChan {
+		if msg == nil {
+			break // Gracefully finish the RPC method stream handler
+		}
 		if err := stream.Send(msg); err != nil {
 			return err
 		}
@@ -80,9 +82,36 @@ func (s *SignalingServer) StartConnection(req *pb.SignalMessage, stream pb.Signa
 }
 
 func (s *SignalingServer) SendSignal(ctx context.Context, req *pb.SignalMessage) (*pb.SignalResponse, error) {
+	// 1. Handle Disconnect Payloads
+	if disconnectPayload := req.GetDisconnect(); disconnectPayload != nil {
+		nodeID := disconnectPayload.NodeId
+
+		s.mu.Lock()
+		session, exists := s.nodes[nodeID]
+		if exists {
+			// Deleting the node triggers the clean loop finish in StartConnection's defer block
+			delete(s.nodes, nodeID)
+		}
+		s.mu.Unlock()
+
+		if !exists {
+			return &pb.SignalResponse{Success: false, Message: "Node session not found or already inactive"}, nil
+		}
+
+		// Explicitly notify the loop channel to exit immediately rather than waiting for TCP drop
+		select {
+		case session.EventChan <- nil: // Passing a nil pointer or close sentinel breaks the stream loop
+		default:
+		}
+
+		log.Printf("[-] Clean Unregistration Request Completed: %s", nodeID)
+		return &pb.SignalResponse{Success: true, Message: "Cleanly unregistered"}, nil
+	}
+
+	// 2. Handle Dial Payloads (Your existing logic)
 	dialPayload := req.GetDial()
 	if dialPayload == nil {
-		return &pb.SignalResponse{Success: false, Message: "Unsupported payload"}, nil
+		return &pb.SignalResponse{Success: false, Message: "Unsupported or empty message payload"}, nil
 	}
 
 	s.mu.RLock()

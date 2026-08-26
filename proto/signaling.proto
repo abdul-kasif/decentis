@@ -1,3 +1,4 @@
+
 syntax = "proto3";
 
 package decentis.signaling.v1;
@@ -6,7 +7,7 @@ option go_package = "decentis/server/signaling;signaling";
 service SignalingService {
     // Registers the node and opens a server-push stream for peer events
     rpc StartConnection (SignalMessage) returns (stream SignalMessage);
-    // Unary call to initiate actions (e.g., dial a peer)
+    // Unary call to initiate actions (e.g., dial a peer, disconnect)
     rpc SendSignal (SignalMessage) returns (SignalResponse);
 }
 
@@ -16,10 +17,12 @@ message SignalResponse {
 }
 
 message SignalMessage {
+    // Using `oneof` allows us to multiplex different events over the same RPC methods
     oneof payload {
         RegisterNode register = 1;
         DialPeer dial = 2;
         PeerFound peer_found = 3;
+        DisconnectNode disconnect = 4; // 1. Added the disconnect payload variant
     }
 }
 
@@ -41,3 +44,8 @@ message PeerFound {
     uint32 public_port = 3;
     string local_ip = 4;
 }
+
+message DisconnectNode {
+    string node_id = 1; // Base64 Public Key of the disconnecting node
+}
+
