@@ -19,6 +19,7 @@ use proto::{SendFileRequest, StatusRequest, StatusResponse, TransferProgress};
 
 mod crypto;
 mod file_relay;
+mod nat;
 mod transport;
 mod tun;
 
@@ -125,6 +126,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Initialize QUIC Endpoint
     let bind_addr = format!("0.0.0.0:{}", port).parse().unwrap();
     let endpoint = transport::endpoint::create_quic_endpoint(bind_addr)?;
+
+    // --- TIER 1 NAT TRAVERSAL ---
+    let local_port = port.parse::<u16>().unwrap_or(51820);
+    tokio::spawn(async move {
+        match nat::upnp::map_external_port(local_port).await {
+            Ok(public_addr) => tracing::info!(
+                "Tier 1 Traversal complete. Public Endpoint: {}",
+                public_addr
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    "Tier 1 UPnP failed: {}. Falling back to Tier 2 (STUN)...",
+                    e
+                );
+                // TODO: Trigger Tier 2 STUN resolution here in the next step
+            }
+        }
+    });
 
     let quic_endpoint = endpoint.clone();
     let active_tun = tun_dev.clone();
