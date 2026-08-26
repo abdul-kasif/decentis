@@ -127,20 +127,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = format!("0.0.0.0:{}", port).parse().unwrap();
     let endpoint = transport::endpoint::create_quic_endpoint(bind_addr)?;
 
-    // --- TIER 1 NAT TRAVERSAL ---
+    // --- TIER 1 & 2 NAT TRAVERSAL ---
     let local_port = port.parse::<u16>().unwrap_or(51820);
     tokio::spawn(async move {
         match nat::upnp::map_external_port(local_port).await {
-            Ok(public_addr) => tracing::info!(
-                "Tier 1 Traversal complete. Public Endpoint: {}",
-                public_addr
-            ),
+            Ok(public_addr) => {
+                tracing::info!("Tier 1 Traversal complete. Endpoint: {}", public_addr)
+            }
             Err(e) => {
                 tracing::warn!(
                     "Tier 1 UPnP failed: {}. Falling back to Tier 2 (STUN)...",
                     e
                 );
-                // TODO: Trigger Tier 2 STUN resolution here in the next step
+
+                match nat::stun::discover_public_ip().await {
+                    Ok(public_addr) => {
+                        tracing::info!(
+                            "Tier 2 Traversal complete. My Public IP is: {}",
+                            public_addr.ip()
+                        );
+
+                        // NOTE: For true UDP Hole Punching (Tier 2/3), the Daemon would now
+                        // exchange this public IP with the remote peer via a signaling server.
+                    }
+                    Err(stun_err) => {
+                        tracing::error!(
+                            "Tier 2 STUN failed: {}. Node is strictly firewalled.",
+                            stun_err
+                        );
+                        // TODO: Fallback to Tier 4 (Mesh Relaying)
+                    }
+                }
             }
         }
     });
