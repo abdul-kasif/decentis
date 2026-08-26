@@ -1,6 +1,8 @@
+use base64::{engine::general_purpose::STANDARD as b64, Engine};
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{transport::Server, Request, Response, Status};
@@ -49,13 +51,21 @@ impl DaemonControl for ControlServiceImpl {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    // Environment configuration for local testing
     let vip = env::var("VIP").unwrap_or_else(|_| "10.99.0.1".to_string());
     let port = env::var("PORT").unwrap_or_else(|_| "51820".to_string());
     let peer_addr = env::var("PEER").ok();
+    let peer_pub_b64 = env::var("PEER_PUB").ok();
 
-    // UDS path varies to avoid collisions when running 2 local nodes
     let socket_path = format!("/tmp/decentis_{}.sock", port);
+
+    // Generate static identity key for this node
+    let raw_key = crypto::handshake::generate_static_keypair()?;
+    tracing::info!(
+        "Identity generated. My Public Key: {}",
+        b64.encode(&raw_key.public)
+    );
+
+    let local_key = Arc::new(raw_key);
 
     // 1. Initialize the TUN Device
     let tun_dev = tun::device::start_tun_device(&vip).await?;
@@ -64,40 +74,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = format!("0.0.0.0:{}", port).parse().unwrap();
     let endpoint = transport::endpoint::create_quic_endpoint(bind_addr)?;
 
-    // 3. Establish P2P Connection (Hardcoded for Step 5 testing)
     let quic_endpoint = endpoint.clone();
     let active_tun = tun_dev.clone();
 
     tokio::spawn(async move {
         if let Some(peer) = peer_addr {
+            // DIALER LOGIC
             let addr = peer.parse().unwrap();
+            let remote_pub = b64
+                .decode(peer_pub_b64.expect("PEER_PUB env var required for dialer"))
+                .unwrap();
+
             tracing::info!("Dialing peer at {}...", addr);
             let conn = quic_endpoint
                 .connect(addr, "decentis.local")
                 .unwrap()
                 .await
                 .unwrap();
-            tracing::info!("Connected to peer!");
+            tracing::info!("Connected! Initiating Noise_IK handshake...");
 
-            let _ = transport::datagram::start_datagram_bridge(conn, active_tun).await;
+            match transport::handshake::initiate_noise_handshake(&conn, &local_key, &remote_pub)
+                .await
+            {
+                Ok((tx, rx)) => {
+                    tracing::info!("Handshake successful. Establishing secure bridge.");
+                    let _ =
+                        transport::datagram::start_secure_datagram_bridge(conn, active_tun, tx, rx)
+                            .await;
+                }
+                Err(e) => tracing::error!("Noise_IK handshake failed: {:?}", e),
+            }
         } else {
+            // LISTENER LOGIC
             tracing::info!("Waiting for incoming P2P connections...");
-            // Run a continuous loop so your node can accept multi-peer links
-            // and gracefully handle client reconnection flows.
             while let Some(incoming) = quic_endpoint.accept().await {
                 let active_tun = active_tun.clone();
+                let local_key = local_key.clone();
+
                 tokio::spawn(async move {
                     match incoming.await {
                         Ok(conn) => {
-                            tracing::info!(
-                                "Accepted connection from peer at: {}",
-                                conn.remote_address()
-                            );
-                            let _ =
-                                transport::datagram::start_datagram_bridge(conn, active_tun).await;
+                            tracing::info!("Accepted connection. Awaiting Noise_IK handshake...");
+                            match transport::handshake::respond_noise_handshake(&conn, &local_key)
+                                .await
+                            {
+                                Ok((tx, rx)) => {
+                                    tracing::info!(
+                                        "Handshake successful. Establishing secure bridge."
+                                    );
+                                    let _ = transport::datagram::start_secure_datagram_bridge(
+                                        conn, active_tun, tx, rx,
+                                    )
+                                    .await;
+                                }
+                                Err(e) => tracing::error!("Noise_IK handshake failed: {:?}", e),
+                            }
                         }
                         Err(err) => {
-                            tracing::error!("Failed to complete inbound handshake: {:?}", err);
+                            tracing::error!("Failed to complete QUIC inbound handshake: {:?}", err)
                         }
                     }
                 });
@@ -105,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 4. Start IPC Server
+    // 3. Start IPC Server
     if Path::new(&socket_path).exists() {
         fs::remove_file(&socket_path)?;
     }
