@@ -4,6 +4,7 @@ use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{transport::Server, Request, Response, Status};
 
+mod transport;
 mod tun;
 
 pub mod proto {
@@ -55,6 +56,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::error!("Failed to start TUN device: {}", e);
         return Err(e.into());
     }
+
+    let bind_addr = "0.0.0.0:51820".parse().unwrap();
+    let _quic_endpoint = match transport::endpoint::create_quic_endpoint(bind_addr) {
+        Ok(ep) => ep,
+        Err(e) => {
+            tracing::error!("Failed to initialize QUIC Endpoint: {}", e);
+            return Err(e.into());
+        }
+    };
 
     // 2. Start the IPC Server
     let socket_path = "/tmp/decentis.sock";
