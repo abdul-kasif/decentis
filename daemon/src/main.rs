@@ -15,6 +15,7 @@ use proto::daemon_control_server::{DaemonControl, DaemonControlServer};
 use proto::{SendFileRequest, StatusRequest, StatusResponse, TransferProgress};
 
 mod crypto;
+mod file_relay;
 mod transport;
 mod tun;
 

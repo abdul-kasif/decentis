@@ -30,6 +30,10 @@ snow = { version = "0.10", features = ["ring-accelerated"] }
 chacha20poly1305 = "0.11"
 rand = "0.10"
 base64 = "0.23.1"
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1.1", features = ["alloc"] }
+blake3 = { version = "1.8", features = ["rayon", "mmap"] }
+bitvec = "1.1"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
