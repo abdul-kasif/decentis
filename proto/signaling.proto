@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package decentis.signaling.v1;
+option go_package = "decentis/server/signaling;signaling";
+
+service SignalingService {
+    // Registers the node and opens a server-push stream for peer events
+    rpc StartConnection (SignalMessage) returns (stream SignalMessage);
+    // Unary call to initiate actions (e.g., dial a peer)
+    rpc SendSignal (SignalMessage) returns (SignalResponse);
+}
+
+message SignalResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message SignalMessage {
+    oneof payload {
+        RegisterNode register = 1;
+        DialPeer dial = 2;
+        PeerFound peer_found = 3;
+    }
+}
+
+message RegisterNode {
+    string node_id = 1; // Base64 Public Key of the node
+    string public_ip = 2;
+    uint32 public_port = 3;
+    string local_ip = 4;
+}
+
+message DialPeer {
+    string my_node_id = 1;
+    string target_node_id = 2;
+}
+
+message PeerFound {
+    string target_node_id = 1;
+    string public_ip = 2;
+    uint32 public_port = 3;
+    string local_ip = 4;
+}
