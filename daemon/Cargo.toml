@@ -34,6 +34,7 @@ serde = { version = "1.0", features = ["derive"] }
 postcard = { version = "1.1", features = ["alloc"] }
 blake3 = { version = "1.8", features = ["rayon", "mmap"] }
 bitvec = "1.1"
+uuid = { version = "1.25.0", features = ["v4"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"
