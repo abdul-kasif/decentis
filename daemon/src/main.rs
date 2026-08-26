@@ -1,3 +1,60 @@
+// ==============================================================================
+// DECENTIS DAEMON PRODUCTION HARDENING ROADMAP
+// ==============================================================================
+
+// TODO 1: CONCURRENT HAPPY EYEBALLS RACING (RFC 8305)
+// ------------------------------------------------------------------------------
+// CURRENT: Sequential dialing (tries LAN first, waits for timeout, then tries Public).
+// PRODUCTION STRATEGY:
+// - Spawn simultaneous connection attempts to all candidate endpoints (Local LAN,
+//   Reflexive STUN, UPnP external) using `tokio::select!` or a `FuturesUnordered` race.
+// - Establish the QUIC connection on whichever candidate handshake finishes first,
+//   canceling the slower pending attempts immediately.
+
+// TODO 2: SOCKET SHARING VIA SO_REUSEPORT (CRUCIAL FOR SYMMETRIC NAT)
+// ------------------------------------------------------------------------------
+// CURRENT: `nat::punch::fire_prediction_probes` binds an ephemeral socket (0.0.0.0:0).
+// PRODUCTION STRATEGY:
+// - Construct the underlying UDP socket using the `socket2` crate with `SO_REUSEADDR`
+//   and `SO_REUSEPORT` enabled before passing it to `quinn::Endpoint`.
+// - Fire Tier 3 hole-punching packets directly from the SAME socket bound to Quinn.
+//   This guarantees the router's NAT mapping matches the Quinn endpoint's external port.
+
+// TODO 3: DYNAMIC IPAM & VIRTUAL IP ALLOCATION
+// ------------------------------------------------------------------------------
+// CURRENT: Hardcoded VIP toggle (`if vip == "10.99.0.1" { "10.99.0.2" }`).
+// PRODUCTION STRATEGY:
+// - Implement a mesh IPAM (IP Address Management) table or deterministic hash-to-IP
+//   mapping (e.g., mapping the first 3 bytes of the SHA-256(PublicKey) to 10.99.X.Y).
+// - Maintain a dynamic `PeerRoutingTable` associating `PeerPublicKey` -> `VirtualIP`.
+
+// TODO 4: PERSISTENT CRYPTOGRAPHIC IDENTITY
+// ------------------------------------------------------------------------------
+// CURRENT: Generates an ephemeral static keypair on every daemon startup.
+// PRODUCTION STRATEGY:
+// - Persist the node's static private key in `/etc/decentis/identity.key` or
+//   `~/.config/decentis/identity.key` with strict 0600 file permissions.
+// - Only generate a new keypair if the file is absent.
+
+// TODO 5: GRACEFUL SHUTDOWN & CLEANUP HOOKS
+// ------------------------------------------------------------------------------
+// CURRENT: Process termination leaves the UDS socket file and UPnP mappings active.
+// PRODUCTION STRATEGY:
+// - Trap `tokio::signal::ctrl_c()` and `SIGTERM`.
+// - On shutdown:
+//     1. Call `nat::upnp::remove_external_port(local_port)`.
+//     2. Remove `/tmp/decentis_{port}.sock`.
+//     3. Bring down and delete the TUN network interface cleanly.
+//     4. Notify the signaling server with a `Disconnect` event.
+
+// TODO 6: SIGNALING RECONNECT RESILIENCE & EXPONENTIAL BACKOFF
+// ------------------------------------------------------------------------------
+// CURRENT: Single-shot `start_registration` call.
+// PRODUCTION STRATEGY:
+// - Wrap the signaling gRPC stream in a supervision loop with exponential backoff
+//   (1s, 2s, 4s, ... max 30s) so transient internet drops or signaling restarts
+//   do not sever future peer rendezvous.
+//
 use base64::{engine::general_purpose::STANDARD as b64, Engine};
 use std::collections::HashMap;
 use std::env;
