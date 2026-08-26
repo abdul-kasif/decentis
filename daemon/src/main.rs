@@ -2,6 +2,7 @@ use base64::{engine::general_purpose::STANDARD as b64, Engine};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc; // Shared atomic pointers
 use tokio::net::UnixListener;
@@ -12,6 +13,10 @@ use uuid::Uuid;
 
 pub mod proto {
     tonic::include_proto!("decentis.v1");
+}
+
+pub mod signaling_proto {
+    tonic::include_proto!("decentis.signaling.v1");
 }
 
 use proto::daemon_control_server::{DaemonControl, DaemonControlServer};
@@ -127,12 +132,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = format!("0.0.0.0:{}", port).parse().unwrap();
     let endpoint = transport::endpoint::create_quic_endpoint(bind_addr)?;
 
-    // --- TIER 1 & 2 NAT TRAVERSAL ---
+    // --- TIER 1 & 2 NAT TRAVERSAL & SIGNALING REGISTRATION ---
     let local_port = port.parse::<u16>().unwrap_or(51820);
+    let (peer_discovered_tx, mut peer_discovered_rx) = tokio::sync::mpsc::channel(16);
+    let my_node_pubkey_b64 = b64.encode(&local_key.public);
+
+    // Instantiate client outside so it can be moved into the async block
+    let sig_client = Arc::new(nat::signaling::SignalingClient::new(
+        "http://127.0.0.1:50051",
+        my_node_pubkey_b64,
+    ));
+
+    let sig_client_clone = sig_client.clone();
+    let port_str = port.clone();
+
     tokio::spawn(async move {
+        let mut public_socket: Option<SocketAddr> = None;
+
         match nat::upnp::map_external_port(local_port).await {
             Ok(public_addr) => {
-                tracing::info!("Tier 1 Traversal complete. Endpoint: {}", public_addr)
+                tracing::info!("Tier 1 Traversal complete. Endpoint: {}", public_addr);
+                public_socket = Some(public_addr);
             }
             Err(e) => {
                 tracing::warn!(
@@ -146,9 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "Tier 2 Traversal complete. My Public IP is: {}",
                             public_addr.ip()
                         );
-
-                        // NOTE: For true UDP Hole Punching (Tier 2/3), the Daemon would now
-                        // exchange this public IP with the remote peer via a signaling server.
+                        public_socket = Some(SocketAddr::new(public_addr.ip(), local_port));
                     }
                     Err(stun_err) => {
                         tracing::error!(
@@ -159,6 +177,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+        }
+
+        // If an external IP was successfully discovered, register with the signaling server
+        if let Some(socket) = public_socket {
+            tracing::info!(
+                "Registering with signaling server using address: {}",
+                socket
+            );
+            if let Err(err) = sig_client_clone
+                .start_registration(socket, "127.0.0.1".to_string(), peer_discovered_tx)
+                .await
+            {
+                tracing::error!("Signaling server registration failed: {}", err);
+            }
+        } else {
+            tracing::error!("Skipping signaling registration: No public IP discovered.");
         }
     });
 
