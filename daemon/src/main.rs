@@ -12,6 +12,7 @@ pub mod proto {
 use proto::daemon_control_server::{DaemonControl, DaemonControlServer};
 use proto::{SendFileRequest, StatusRequest, StatusResponse, TransferProgress};
 
+mod crypto;
 mod transport;
 mod tun;
 
