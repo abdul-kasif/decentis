@@ -28,14 +28,6 @@
 //   mapping (e.g., mapping the first 3 bytes of the SHA-256(PublicKey) to 10.99.X.Y).
 // - Maintain a dynamic `PeerRoutingTable` associating `PeerPublicKey` -> `VirtualIP`.
 
-// TODO 4: PERSISTENT CRYPTOGRAPHIC IDENTITY
-// ------------------------------------------------------------------------------
-// CURRENT: Generates an ephemeral static keypair on every daemon startup.
-// PRODUCTION STRATEGY:
-// - Persist the node's static private key in `/etc/decentis/identity.key` or
-//   `~/.config/decentis/identity.key` with strict 0600 file permissions.
-// - Only generate a new keypair if the file is absent.
-
 // TODO 5: GRACEFUL SHUTDOWN & CLEANUP HOOKS
 // ------------------------------------------------------------------------------
 // CURRENT: Process termination leaves the UDS socket file and UPnP mappings active.
@@ -202,10 +194,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let socket_path = format!("/tmp/decentis_{}.sock", port);
 
-    // Generate static identity key for this node
-    let raw_key = crypto::handshake::generate_static_keypair()?;
+    // Load or generate persistent identity
+    let identity_path =
+        env::var("IDENTITY_PATH").unwrap_or_else(|_| format!("/etc/decentis/node_{}.key", port));
+    let raw_key = crypto::identity::load_or_generate_identity(&identity_path)?;
+
     tracing::info!(
-        "Identity generated. My Public Key: {}",
+        "Node Identity Loaded. My Public Key: {}",
         b64.encode(&raw_key.public)
     );
 
