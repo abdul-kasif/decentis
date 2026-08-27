@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use quinn::Connection;
 use snow::Keypair;
 
@@ -41,10 +41,12 @@ pub async fn initiate_noise_handshake(
 }
 
 /// Responder (Listener) executes this upon accepting a connection.
+/// Returns the session primitives along with the verified remote peer's static public key.
 pub async fn respond_noise_handshake(
     conn: &Connection,
     local_key: &Arc<Keypair>,
-) -> Result<(SessionTx, SessionRx)> {
+) -> Result<(SessionTx, SessionRx, Vec<u8>)> {
+    // <-- 1. Updated Return Type Signature Tuple
     // 1. Accept the incoming bi-directional stream
     let (mut send, mut recv) = conn.accept_bi().await?;
     let mut responder = build_responder(local_key)?;
@@ -63,9 +65,17 @@ pub async fn respond_noise_handshake(
     let resp_len = responder.write_message(&[], &mut buf)?;
     send.write_all(&buf[..resp_len]).await?;
 
+    // 4. Extract the remote authenticated public static key from the Snow state engine
+    let remote_public_key = responder
+        .get_remote_static()
+        .ok_or_else(|| anyhow!("Handshake failed to capture a valid remote static public key"))?
+        .to_vec();
+
     let transport = responder.into_stateless_transport_mode()?;
 
     send.finish()?;
 
-    Ok(split_session(transport))
+    // 5. Return all three elements up to your main loop thread context cleanly
+    let (tx, rx) = split_session(transport);
+    Ok((tx, rx, remote_public_key))
 }

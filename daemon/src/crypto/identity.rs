@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use snow::Keypair;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+use std::net::Ipv4Addr;
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -86,4 +87,30 @@ pub fn load_or_generate_identity(path: impl AsRef<Path>) -> Result<Keypair> {
         path
     );
     Ok(keypair)
+}
+
+/// Deterministically generates a 10.99.X.Y Virtual IP address from a Curve25519 Public Key.
+pub fn derive_virtual_ip(public_key: &[u8]) -> Ipv4Addr {
+    // A Curve25519 public key is 32 bytes.
+    // We use the first two bytes to form the subnet host identifier.
+    // (Note: To prevent a .0 or .255 broadcast/network boundary, we clamp the values)
+
+    let mut byte3 = public_key[0];
+    let mut byte4 = public_key[1];
+
+    // Basic clamp to avoid .0.0 or .255.255 edge cases in standard routing
+    if byte3 == 0 {
+        byte3 = 1;
+    }
+    if byte4 == 0 {
+        byte4 = 1;
+    }
+    if byte3 == 255 {
+        byte3 = 254;
+    }
+    if byte4 == 255 {
+        byte4 = 254;
+    }
+
+    Ipv4Addr::new(10, 99, byte3, byte4)
 }

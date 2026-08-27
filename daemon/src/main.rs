@@ -188,8 +188,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown_token = CancellationToken::new();
 
     // Environment configuration
-    let vip = env::var("VIP").unwrap_or_else(|_| "10.99.0.1".to_string());
     let port = env::var("PORT").unwrap_or_else(|_| "51820".to_string());
+    let _peer_addr = env::var("PEER").ok();
     let peer_pub_b64 = env::var("PEER_PUB").ok();
 
     let socket_path = format!("/tmp/decentis_{}.sock", port);
@@ -199,9 +199,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("IDENTITY_PATH").unwrap_or_else(|_| format!("/etc/decentis/node_{}.key", port));
     let raw_key = crypto::identity::load_or_generate_identity(&identity_path)?;
 
+    // --- DYNAMIC IPAM ALLOCATION ---
+    let vip = crypto::identity::derive_virtual_ip(&raw_key.public).to_string();
+
     tracing::info!(
-        "Node Identity Loaded. My Public Key: {}",
-        b64.encode(&raw_key.public)
+        "Node Identity Loaded. My Public Key: {} -> Assigned VIP: {}",
+        b64.encode(&raw_key.public),
+        vip
     );
 
     // Wrap the raw keypair inside an Arc atomic container
@@ -306,7 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_key_for_dialer = local_key.clone();
     let peer_registry_for_dialer = registry_for_network.clone();
     let save_dir_for_dialer = save_dir.clone();
-    let vip_for_dialer = vip.clone();
+    let _vip_for_dialer = vip.clone();
     let current_peer_pub_filter = peer_pub_b64.clone(); // Safely moved into closure instead of parent scope mapping
 
     // Spawn the Rendezvous Listener Task
@@ -396,15 +400,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 tracing::info!(
                                     "Noise_IK handshake successful. Secure tunnel active."
                                 );
-                                let peer_vip = if vip_for_dialer == "10.99.0.1" {
-                                    "10.99.0.2"
-                                } else {
-                                    "10.99.0.1"
-                                };
+
+                                // Derive their VIP dynamically from their public key!
+                                let peer_vip =
+                                    crypto::identity::derive_virtual_ip(&remote_pub).to_string();
+                                tracing::info!("Registering peer {} in routing table.", peer_vip);
+
                                 peer_registry_for_dialer
                                     .write()
                                     .await
-                                    .insert(peer_vip.to_string(), conn.clone());
+                                    .insert(peer_vip, conn.clone());
 
                                 transport::stream::spawn_incoming_stream_listener(
                                     conn.clone(),
@@ -431,13 +436,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // --- 4. Continuous Inbound Listener Logic ---
-    // Every node acts as a server to handle incoming connections seamlessly
     let quic_endpoint_listener = quic_endpoint.clone();
     let active_tun_listener = active_tun.clone();
     let registry_for_listener = registry_for_network.clone();
     let local_key_listener = local_key.clone();
     let save_dir_listener = save_dir.clone();
-    let vip_listener = vip.clone();
+    let _vip_listener = vip.clone();
+    let inbound_peer_filter = peer_pub_b64.clone();
 
     tokio::spawn(async move {
         tracing::info!("Awaiting inbound P2P socket allocations...");
@@ -446,29 +451,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let local_key = local_key_listener.clone();
             let registry_ref = registry_for_listener.clone();
             let save_dir_ref = save_dir_listener.clone();
-            let current_node_vip = vip_listener.clone();
+            let current_filter = inbound_peer_filter.clone();
 
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(conn) => {
                         tracing::info!("Accepted connection. Awaiting Noise_IK handshake...");
+
+                        // Capture the 3-tuple straight from your updated handshake processor
                         match transport::handshake::respond_noise_handshake(&conn, &local_key).await
                         {
-                            Ok((tx, rx)) => {
-                                tracing::info!("Handshake successful. Establishing secure bridge.");
-                                let peer_vip = if current_node_vip == "10.99.0.1" {
-                                    "10.99.0.2"
-                                } else {
-                                    "10.99.0.1"
-                                };
-                                registry_ref
-                                    .write()
-                                    .await
-                                    .insert(peer_vip.to_string(), conn.clone());
+                            Ok((tx, rx, remote_pub)) => {
+                                let remote_pub_b64 = b64.encode(&remote_pub);
+
+                                // Run your active verification check boundary
+                                if let Some(ref allowed_key) = current_filter {
+                                    if allowed_key != &remote_pub_b64 {
+                                        tracing::warn!(
+                                            "SECURITY ALERT: Rejected unauthorized connection from rogue public key: {}", 
+                                            remote_pub_b64
+                                        );
+                                        conn.close(4001u32.into(), b"Unauthorized Node Public Key");
+                                        return;
+                                    }
+                                }
+
+                                tracing::info!(
+                                    "Handshake verified successfully. Establishing secure bridge."
+                                );
+
+                                let peer_vip =
+                                    crypto::identity::derive_virtual_ip(&remote_pub).to_string();
+
+                                tracing::info!(
+                                    "Registering peer {} in secure routing table.",
+                                    peer_vip
+                                );
+                                registry_ref.write().await.insert(peer_vip, conn.clone());
+
                                 transport::stream::spawn_incoming_stream_listener(
                                     conn.clone(),
                                     save_dir_ref,
                                 );
+
                                 let _ = transport::datagram::start_secure_datagram_bridge(
                                     conn, active_tun, tx, rx,
                                 )
